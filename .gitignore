@@ -1,0 +1,23 @@
+# Binaries for programs and plugins
+*.exe
+*.darwin
+*.linux
+*.windows
+
+# Test binary, generated with `go test -c`
+*.test
+
+# Output of the go toolchain
+.cache
+
+# Dependencies
+vendor/
+
+# macOS specific files
+.DS_Store
+
+# IDE specific files
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
