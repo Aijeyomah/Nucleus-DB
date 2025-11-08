@@ -33,7 +33,6 @@ func NewNode(cfg *Config, fsm *FSM) (*Node, error) {
 		return nil, fmt.Errorf("mkdir raft data: %w", err)
 	}
 
-	// Transport
 	addr, err := net.ResolveTCPAddr("tcp", string(cfg.RaftAddr))
 	if err != nil {
 		return nil, fmt.Errorf("resolve raft addr: %w", err)
@@ -43,14 +42,12 @@ func NewNode(cfg *Config, fsm *FSM) (*Node, error) {
 		return nil, fmt.Errorf("tcp transport: %w", err)
 	}
 
-	// Log + stable + snapshots (Bolt + file snapshots)
 	stores, err := OpenStores(cfg.DataDir, max(1, cfg.SnapshotRetain))
 	if err != nil {
 		_ = trans.Close()
 		return nil, fmt.Errorf("open stores: %w", err)
 	}
 
-	// Raft config
 	rc := raft.DefaultConfig()
 	rc.LocalID = raft.ServerID(cfg.RaftAddr) // must match what we use in Servers[]
 	rc.SnapshotInterval = 30 * time.Second
@@ -68,7 +65,6 @@ func NewNode(cfg *Config, fsm *FSM) (*Node, error) {
 		return nil, fmt.Errorf("log cache: %w", err)
 	}
 
-	// Create Raft instance
 	r, err := raft.NewRaft(rc, fsm, logCache, stores.StableStore, stores.SnapshotStore, trans)
 	if err != nil {
 		_ = trans.Close()

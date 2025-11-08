@@ -72,14 +72,14 @@ func main() {
 	peerHTTP := formatPeerHttp(*flagPeerHTTP)
 	kv := store.NewInMemory()
 
-	fsm := raftgroup.FSM{KV: kv}
+	fsm := raftgroup.NewFSM(kv)
 	rnode, err := raftgroup.NewNode(&raftgroup.Config{
 		NodeID:         nodeId,
 		RaftAddr:       raft.ServerAddress(*flagRaftAddr),
 		DataDir:        *flagRaftDir,
 		PeerAddress:    peers,
 		SnapshotRetain: *flagSnapKeep,
-	}, &fsm)
+	}, fsm)
 	if err != nil {
 		log.Fatalf("raft node: %v", err)
 	}

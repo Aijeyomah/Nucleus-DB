@@ -90,6 +90,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 		s.notLeader(w)
 		return
 	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, int64(s.opt.MaxByteValue))
 	body, err := io.ReadAll(r.Body)
 	if err != nil {

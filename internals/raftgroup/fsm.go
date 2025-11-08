@@ -26,30 +26,40 @@ type KvSnapshot struct {
 	state map[string]string
 }
 
-func (f *FSM) Apply(l *raft.Log) interface{} {
-	dec := gob.NewDecoder(bytes.NewReader(l.Data))
+func NewFSM(kv *store.InMemory) *FSM {
+	return &FSM{
+		KV:   kv,
+		seen: make(map[string]struct{}),
+	}
+}
 
+func (f *FSM) Apply(l *raft.Log) interface{} {
 	var op store.PutOp
-	if err := dec.Decode(&op); err != nil && op.Key == "" {
+
+	if err := gob.NewDecoder(bytes.NewReader(l.Data)).Decode(&op); err != nil {
 		return nil
 	}
-	// handle idenpotency to prevent mu -> but will check if this causes latency
+	if op.Key == "" {
+		return nil
+	}
+
 	if op.ClientID != "" && op.RequestID != "" {
 		id := fmt.Sprintf("%s:%s", op.ClientID, op.RequestID)
-		f.mu.Lock()
 
+		f.mu.Lock()
+		if f.seen == nil {
+			f.seen = make(map[string]struct{})
+		}
 		if _, ok := f.seen[id]; ok {
-			// ignore processing this request
 			f.mu.Unlock()
 			return nil
 		}
 		f.seen[id] = struct{}{}
 		f.mu.Unlock()
 	}
-	// apply to KV
+
 	f.KV.Put(op.Key, op.Value)
 	return nil
-
 }
 
 func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
