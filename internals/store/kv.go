@@ -41,4 +41,25 @@ func (s *InMemory) CAS(key, cmp, val string) {
 	}
 }
 
-// handle key limit thing
+// return a copy of the currnt memory state
+func(s *InMemory) Snapshot() map[string]string {
+	s.mu.RLock()
+  defer s.mu.Unlock()
+
+	cp := make(map[string]string)
+	for k, v := range s.data {
+		cp[k] = v
+	}
+	return cp
+}
+
+func(s *InMemory) Restore(m map[string]string){
+	s.mu.RLock()
+	defer s.mu.Unlock()
+
+	s.data = make(map[string]string)
+	for k, v := range m {
+		s.data[k] = v
+	}
+}
+

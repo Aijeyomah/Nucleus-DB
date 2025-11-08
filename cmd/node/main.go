@@ -9,12 +9,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Aijeyomah/NucleusDB/internals/api/httpserver"
 	"github.com/Aijeyomah/NucleusDB/internals/config"
+	"github.com/Aijeyomah/NucleusDB/internals/raftgroup"
 	"github.com/Aijeyomah/NucleusDB/internals/store"
+	"github.com/hashicorp/raft"
 )
 
 // might change to gin but just learning how net http works
@@ -26,10 +29,16 @@ func main() {
 		HttpAddr        = flag.String("http-addr", "", "http listen address")
 		FlagControlAddr = flag.String("control-plane", "", "control plane address, for example http://localhost:9000")
 
-		// Leader simulation for v1 (manual until Raft is implemented)
-		flagIsLeader     = flag.Bool("leader", true, "treat this node as leader for its shard (temporary for v1)")
-		flagLeaderAdvert = flag.String("leader-addr", "", "leader HTTP base URL to advertise to clients when not leader (e.g., http://localhost:8080)")
-		flagMaxByteValue = flag.Int("max-value-bytes", 1024, "maximum allowed request body size for PUT (bytes)")
+		flagRaftAddr  = flag.String("raft-addr", "127.0.0.1:9001", "raft TCP addr for this node")
+		flagRaftPeers = flag.String("raft-peers", "127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003", "comma-separated raft peer addrs (include self)")
+		flagRaftDir   = flag.String("raft-dir", "./data/raft", "dir for raft db & snapshots")
+		flagSnapKeep  = flag.Int("raft-snapshot-retain", 2, "snapshots to retain")
+
+		flagAdvertiseHTTP = flag.String("advertise-http", "http://localhost:8080", "this node's public HTTP base")
+		flagPeerHTTP      = flag.String("peer-http", "", "optional mapping raftAddr=httpBase,comma separated")
+		flagMaxValueBytes = flag.Int("max-value-bytes", 1024, "max PUT body bytes")
+		flagMaxKeyBytes   = flag.Int("max-key-bytes", 4096, "max key bytes")
+		flagProposeTOms   = flag.Int("propose-timeout-ms", 5000, "raft propose timeout ms")
 	)
 
 	flag.Parse()
@@ -46,23 +55,45 @@ func main() {
 	// will priotize CLI values provides over defaults in YAML
 	nodeId := resolve(*NodeId, cfg.NodeId)
 	httpAddr := resolve(*HttpAddr, cfg.HTTPAddr)
-	controlPlane := resolve(*FlagControlAddr, cfg.ControlPlane)
+	// controlPlane := resolve(*FlagControlAddr, cfg.ControlPlane)
+
 	shardId := *ShardID
 	if shardId == 0 {
 		shardId = cfg.ShardId
 	}
-	log.Printf("starting node. node_id=%s shard=%d http_addr=%s control_plane=%s leader=%v leader_advert=%s", nodeId, shardId, httpAddr, controlPlane, *flagIsLeader, *flagLeaderAdvert)
 
+	// raft config
+	peerStrs := splitCSV(*flagRaftPeers)
+	peers := []raft.ServerAddress{}
+	for _, p := range peerStrs {
+		peers = append(peers, raft.ServerAddress(p))
+	}
+
+	peerHTTP := formatPeerHttp(*flagPeerHTTP)
 	kv := store.NewInMemory()
 
+	fsm := raftgroup.NewFSM(kv)
+	rnode, err := raftgroup.NewNode(&raftgroup.Config{
+		NodeID:         nodeId,
+		RaftAddr:       raft.ServerAddress(*flagRaftAddr),
+		DataDir:        *flagRaftDir,
+		PeerAddress:    peers,
+		SnapshotRetain: *flagSnapKeep,
+	}, fsm)
+	if err != nil {
+		log.Fatalf("raft node: %v", err)
+	}
+
 	handler := httpserver.New(httpserver.Options{
-		NodeId:          nodeId,
-		ShardId:         shardId,
-		IsLeader:        *flagIsLeader,
-		LeaderAdvertise: *flagLeaderAdvert,
-		KV:              kv,
-		MaxByteValue:    *flagMaxByteValue,
-		MaxByteKey:      4096, // This is a reasonable value
+		NodeId:         nodeId,
+		ShardId:        shardId,
+		KV:             kv,
+		Raft:           rnode,
+		MaxByteValue:   *flagMaxValueBytes,
+		MaxByteKey:     *flagMaxKeyBytes,
+		ProposeTimeout: time.Duration(*flagProposeTOms) * time.Millisecond,
+		PeerHTTP:       peerHTTP,
+		AdvertiseHTTP:  *flagAdvertiseHTTP,
 	})
 
 	srv := &http.Server{
@@ -70,6 +101,9 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+
+	log.Printf(`[boot] {"node_id":"%s","shard_id":%d,"http":%q,"raft":%q,"peers":%q,"dir":%q}`,
+		nodeId, shardId, httpAddr, *flagRaftAddr, *flagRaftPeers, *flagRaftDir)
 
 	errChan := make(chan error, 1)
 	go func() {
@@ -109,4 +143,37 @@ func resolve(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func splitCSV(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func formatPeerHttp(s string) map[string]string {
+	m := map[string]string{}
+	if strings.TrimSpace(s) == "" {
+		return m
+	}
+	for _, kv := range strings.Split(s, ",") {
+		kv = strings.TrimSpace(kv)
+		if kv == "" || !strings.Contains(kv, "=") {
+			continue
+		}
+		parts := strings.SplitN(kv, "=", 2)
+		m[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+	}
+	return m
 }
