@@ -21,3 +21,5 @@ vendor/
 .vscode/
 *.sublime-project
 *.sublime-workspace
+
+data/

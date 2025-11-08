@@ -7,18 +7,29 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Aijeyomah/NucleusDB/internals/store"
 )
 
+type Proposer interface {
+	IsLeader() bool
+	LeaderRaftAddr() string
+	ProposePut(op store.PutOp, timeout time.Duration) error
+}
+
 type Options struct {
-	NodeId          string
-	ShardId         int
-	IsLeader        bool
-	LeaderAdvertise string
-	KV              *store.InMemory
-	MaxByteValue    int
-	MaxByteKey      int
+	NodeId         string
+	ShardId        int
+	KV             *store.InMemory
+	Raft           Proposer
+	MaxByteValue   int
+	MaxByteKey     int
+	ProposeTimeout time.Duration
+	// Advertised HTTP address (this node) to help clients (optional)
+	AdvertiseHTTP string
+	// Optional: map from raftAddr -> httpBase (for better redirect hints)
+	PeerHTTP map[string]string
 }
 
 type Server struct {
@@ -27,6 +38,15 @@ type Server struct {
 }
 
 func New(opt Options) *Server {
+	if opt.ProposeTimeout <= 0 {
+		opt.ProposeTimeout = 5 * time.Second
+	}
+	if opt.MaxByteKey <= 0 {
+		opt.MaxByteKey = 4096
+	}
+	if opt.MaxByteValue <= 0 {
+		opt.MaxByteValue = 1024
+	}
 	server := &Server{
 		mu:  http.NewServeMux(),
 		opt: opt,
@@ -47,32 +67,27 @@ func (s *Server) routes() { // Todo: see how to warp each handler to get the lat
 }
 
 func (s *Server) handleHeath(w http.ResponseWriter, _ *http.Request) {
-	WriteJson(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleWhoami(w http.ResponseWriter, _ *http.Request) {
 	role := "follower"
-	if s.opt.IsLeader {
+	if s.opt.Raft != nil && s.opt.Raft.IsLeader() {
 		role = "leader"
 	}
-	WriteJson(w, http.StatusOK, map[string]any{
-		"node_id":   s.opt.NodeId,
-		"shard_id":  s.opt.ShardId,
-		"role":      role,
-		"leader_at": s.opt.LeaderAdvertise,
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node_id":        s.opt.NodeId,
+		"shard_id":       s.opt.ShardId,
+		"role":           role,
+		"advertise_http": s.opt.AdvertiseHTTP,
 	},
 	)
 }
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 	// To ensure strong consistency, only the leader will accept writes
-	if !s.opt.IsLeader {
-		WriteJson(w, http.StatusConflict, map[string]any{
-			"error":        "not_leader",
-			"leader_addr":  s.opt.LeaderAdvertise,
-			"shard_id":     s.opt.ShardId,
-			"redirectable": s.opt.LeaderAdvertise != "",
-		})
+	if s.opt.Raft == nil || !s.opt.Raft.IsLeader() {
+		s.notLeader(w)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, int64(s.opt.MaxByteValue))
@@ -83,22 +98,35 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 	}
 	defer r.Body.Close()
 	val := string(body)
-	s.opt.KV.Put(key, val)
 
-	WriteJson(w, http.StatusOK, map[string]any{
+	clientId := "client"
+	requestId := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	op := store.NewPutOp(key, val, clientId, requestId)
+
+	if err := s.opt.Raft.ProposePut(op, 5*time.Second); err != nil {
+		http.Error(w, "raft apply failed: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":    true,
 		"key":   key,
-		"value": val,
+		"bytes": len(body),
 	})
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, _ *http.Request, key string) {
+	// Strict: leader-only reads for linearizability
+	if s.opt.Raft == nil || !s.opt.Raft.IsLeader() {
+		s.notLeader(w)
+		return
+	}
 	val, ok := s.opt.KV.Get(key)
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	WriteJson(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"key":   key,
 		"value": val,
 	})
@@ -106,7 +134,7 @@ func (s *Server) handleGet(w http.ResponseWriter, _ *http.Request, key string) {
 
 func (s *Server) handleDelete(w http.ResponseWriter, _ *http.Request, key string) {
 	s.opt.KV.Delete(key) //Todo:  check if we need to confirm the key exist. nd if this Delete is compartable with the code or maybe i need to implemnt manualy
-	WriteJson(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true,
 	})
 }
@@ -116,6 +144,7 @@ func (s *Server) handleKV(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.validateKey(key); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	switch r.Method {
@@ -130,12 +159,33 @@ func (s *Server) handleKV(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func WriteJson(w http.ResponseWriter, code int, payload any) {
+func writeJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		log.Printf("[http] write json error: %v", err)
 	}
+}
+
+func (s *Server) notLeader(w http.ResponseWriter) {
+	leaderRaft := ""
+	leaderHttp := ""
+
+	if s.opt.Raft != nil {
+		leaderRaft = s.opt.Raft.LeaderRaftAddr()
+		if s.opt.PeerHTTP != nil {
+			if val, ok := s.opt.PeerHTTP[leaderRaft]; ok {
+				leaderHttp = val
+			}
+		}
+	}
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":       "not_leader",
+		"leader_raft": leaderRaft,
+		"leader_http": leaderHttp,
+		"shard_id":    s.opt.ShardId,
+	})
+
 }
 
 func (s *Server) validateKey(key string) error {
