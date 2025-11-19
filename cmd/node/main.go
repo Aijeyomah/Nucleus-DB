@@ -129,6 +129,85 @@ func main() {
 				}
 			}
 		}(runCtx)
+
+		go func(ctx context.Context) {
+			t := time.NewTicker(3 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					if !rnode.IsLeader() {
+						continue
+					}
+					desired, err := reg.Desired()
+					if err != nil {
+						log.Printf("[cp] desired fetch err: %v", err)
+						continue
+					}
+					// this is what the desired map for this shard
+					want := desired.ByShard[shardId]
+					if want == nil {
+						continue
+					}
+					// inside the reconcile loop (leader only)
+
+					// 1) Build desired-by-address set
+					desiredByAddr := map[raft.ServerAddress]nodecp.DesiredReplica{}
+					for _, rep := range want {
+						addr := raft.ServerAddress(rep.Raft)
+						desiredByAddr[addr] = rep
+					}
+
+					// 2) Snapshot current config as address sets
+					curCfg, err := rnode.CurrentConfig() // map[ServerID]ServerAddress
+					if err != nil {
+						log.Printf("[raft] config err: %v", err)
+						return
+					}
+
+					// make fast-lookup sets
+					curAddrSet := map[raft.ServerAddress]struct{}{}
+					for _, addr := range curCfg {
+						curAddrSet[addr] = struct{}{}
+					}
+
+					// 3) Add missing addresses as learners
+					for addr, rep := range desiredByAddr {
+						if _, ok := curAddrSet[addr]; !ok {
+							log.Printf("[mship] add learner shard=%d raft=%s node=%s", shardId, addr, rep.NodeID)
+							if err := rnode.AddReplicaLearner(raft.ServerID(addr), addr, 5*time.Second); err != nil {
+								log.Printf("[mship] add learner failed: %v", err)
+							}
+						}
+					}
+
+					// 4) Try to promote any present learners (idempotent in Hashi Raft)
+					for addr := range desiredByAddr {
+						_ = rnode.PromoteReplica(raft.ServerID(addr), addr, 5*time.Second)
+					}
+
+					// 5) Remove extras that are present but not desired (by address)
+					for sid, addr := range curCfg {
+						if _, keep := desiredByAddr[addr]; !keep {
+							// Optional: guard against removing the last voter
+							if len(curCfg) == 1 {
+								log.Printf("[mship] skip remove %s: last voter", addr)
+								continue
+							}
+							log.Printf("[mship] remove shard=%d addr=%s", shardId, addr)
+							if err := rnode.RemoveReplica(sid, 5*time.Second); err != nil {
+								log.Printf("[mship] remove failed: %v", err)
+							}
+						}
+					}
+
+				case <-ctx.Done():
+					return
+
+				}
+			}
+		}(runCtx)
+
 	}
 
 	handler := httpserver.New(httpserver.Options{
