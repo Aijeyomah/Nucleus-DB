@@ -235,21 +235,32 @@ func (s *State) LiveCluster() LiveCluster {
 
 	for _, sh := range s.cluster.Shards {
 		lsh := LiveClusterShard{ID: sh.ID}
-		healthy := s.dyn[sh.ID]
-		if healthy != nil {
-			for _, staticNode := range sh.Nodes {
-				if info, ok := healthy[staticNode.NodeID]; ok {
-					lsh.Nodes = append(lsh.Nodes, LiveClusterShardNode{
-						NodeID: info.NodeID,
-						HTTP:   info.HTTP,
-						Raft:   info.Raft,
-					})
-				}
+
+		// Include every node that has sent a heartbeat (dynamic view).
+		seen := make(map[string]struct{})
+		if healthy := s.dyn[sh.ID]; healthy != nil {
+			for _, info := range healthy {
+				lsh.Nodes = append(lsh.Nodes, LiveClusterShardNode{
+					NodeID: info.NodeID,
+					HTTP:   info.HTTP,
+					Raft:   info.Raft,
+				})
+				seen[info.NodeID] = struct{}{}
 			}
 		}
+
+		// this is to optionally display static nodes that have no heartbeat. might comment later since this can show non-helathy statics
+		for _, sn := range sh.Nodes {
+			if _, ok := seen[sn.NodeID]; ok {
+				continue
+			}
+
+		}
+
 		if leader, ok := s.leaderPerShard[sh.ID]; ok {
 			lsh.LeaderHint = leader
 		}
+
 		lc.Shards = append(lc.Shards, lsh)
 	}
 
