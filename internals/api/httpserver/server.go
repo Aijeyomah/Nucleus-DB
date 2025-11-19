@@ -16,6 +16,10 @@ type Proposer interface {
 	IsLeader() bool
 	LeaderRaftAddr() string
 	ProposePut(op store.PutOp, timeout time.Duration) error
+	Role() string
+	Term() uint64
+	LastContactMS() int64
+	Barrier(timeout time.Duration) error
 }
 
 type Options struct {
@@ -29,7 +33,8 @@ type Options struct {
 	// Advertised HTTP address (this node) to help clients (optional)
 	AdvertiseHTTP string
 	// Optional: map from raftAddr -> httpBase (for better redirect hints)
-	PeerHTTP map[string]string
+	PeerHTTP            map[string]string
+	FollowerLeaseWindow time.Duration
 }
 
 type Server struct {
@@ -51,6 +56,7 @@ func New(opt Options) *Server {
 		mu:  http.NewServeMux(),
 		opt: opt,
 	}
+
 	server.routes()
 	return server
 
@@ -64,10 +70,21 @@ func (s *Server) routes() { // Todo: see how to warp each handler to get the lat
 	s.mu.HandleFunc("/health", s.handleHeath)
 	s.mu.HandleFunc("/whoami", s.handleWhoami)
 	s.mu.HandleFunc("/kv/", s.handleKV)
+	s.mu.HandleFunc("/ready", s.ready)
 }
 
 func (s *Server) handleHeath(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node_id":         s.opt.NodeId,
+		"shard_id":        s.opt.ShardId,
+		"role":            s.opt.Raft.IsLeader(),
+		"raft_term":       s.opt.Raft.Term(),
+		"last_contact_ms": s.opt.Raft.LastContactMS(),
+	})
 }
 
 func (s *Server) handleWhoami(w http.ResponseWriter, _ *http.Request) {
@@ -116,21 +133,57 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 	})
 }
 
-func (s *Server) handleGet(w http.ResponseWriter, _ *http.Request, key string) {
+// readMode := r.URL.Query().Get("read")
+
+func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, key string) {
+	// I want to ensure the default mode is strict linearizability read
+	// but client can choose to opt in for follower read byy adding follower_ok to read parameter
+	readMode := r.URL.Query().Get("read")
+
 	// Strict: leader-only reads for linearizability
-	if s.opt.Raft == nil || !s.opt.Raft.IsLeader() {
-		s.notLeader(w)
+	if readMode != "follower_ok" {
+		if s.opt.Raft == nil || !s.opt.Raft.IsLeader() {
+			s.notLeader(w)
+			return
+		}
+
+		if err := s.opt.Raft.Barrier(1 * time.Second); err != nil {
+			http.Error(w, "leader barrier failed", http.StatusServiceUnavailable)
+			return
+		}
+		val, ok := s.opt.KV.Get(key)
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"key":   key,
+			"value": val,
+			"mode":  "linearizable",
+		})
 		return
 	}
-	val, ok := s.opt.KV.Get(key)
-	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "follower_ok only allowed for GET", http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"key":   key,
-		"value": val,
-	})
+	const leaseCutoffMS = int64(300) // less than the raft LeaderLeaseTimeout
+	if s.opt.Raft != nil && (s.opt.Raft.IsLeader() || s.opt.Raft.LastContactMS() <= leaseCutoffMS) {
+		val, ok := s.opt.KV.Get(key)
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"key":             key,
+			"value":           val,
+			"mode":            "follower_ok",
+			"last_contact_ms": s.opt.Raft.LastContactMS(),
+		})
+		return
+	}
+	s.notLeader(w)
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, _ *http.Request, key string) {

@@ -8,12 +8,13 @@ type Node struct {
 }
 
 type Shard struct {
-	ID       int    `json:"id" yaml:"id"`
-	Replicas []Node `json:"replicas" yaml:"replicas"`
+	ID    int    `json:"id" yaml:"id"`
+	Nodes []Node `json:"nodes" yaml:"nodes"`
 }
 
 type ClusterMap struct {
-	Shards []Shard
+	Shards            []Shard `json:"shards" yaml:"shards"`
+	ReplicationFactor int     `json:"replication_factor" yaml:"replication_factor"`
 }
 
 func (c *ClusterMap) ShardIDs() []int {

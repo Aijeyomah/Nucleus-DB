@@ -15,6 +15,7 @@ import (
 
 	"github.com/Aijeyomah/NucleusDB/internals/api/httpserver"
 	"github.com/Aijeyomah/NucleusDB/internals/config"
+	"github.com/Aijeyomah/NucleusDB/internals/nodecp"
 	"github.com/Aijeyomah/NucleusDB/internals/raftgroup"
 	"github.com/Aijeyomah/NucleusDB/internals/store"
 	"github.com/hashicorp/raft"
@@ -43,6 +44,10 @@ func main() {
 
 	flag.Parse()
 
+	// long-lived context for background loops (e.g., heartbeat)
+	runCtx, runCancel := context.WithCancel(context.Background())
+	defer runCancel()
+
 	cfg, err := config.Load(config.Options{
 		File:          *ConfigFile,
 		EnvPrefix:     "KV_",
@@ -52,10 +57,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
-	// will priotize CLI values provides over defaults in YAML
+
+	// prioritize CLI over YAML defaults
 	nodeId := resolve(*NodeId, cfg.NodeId)
 	httpAddr := resolve(*HttpAddr, cfg.HTTPAddr)
-	// controlPlane := resolve(*FlagControlAddr, cfg.ControlPlane)
 
 	shardId := *ShardID
 	if shardId == 0 {
@@ -82,6 +87,48 @@ func main() {
 	}, fsm)
 	if err != nil {
 		log.Fatalf("raft node: %v", err)
+	}
+
+	// ---- Stage 4: control-plane register/heartbeat (optional if --control-plane is set)
+	controlPlane := resolve(*FlagControlAddr, cfg.ControlPlane)
+	if strings.TrimSpace(controlPlane) != "" {
+		reg := nodecp.New(controlPlane)
+
+		role := "follower"
+		if rnode.IsLeader() {
+			role = "leader"
+		}
+
+		// Register once
+		if err := reg.Register(
+			nodeId, shardId,
+			*flagAdvertiseHTTP, string(*flagRaftAddr),
+			role, 0, // might replace with rnode.Term() if i need to expose
+		); err != nil {
+			log.Printf("[cp] register failed: %v", err)
+		} else {
+			log.Printf("[cp] registered")
+		}
+
+		// Heartbeat loop
+		go func(ctx context.Context) {
+			t := time.NewTicker(2 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					currRole := "follower"
+					if rnode.IsLeader() {
+						currRole = "leader"
+					}
+					if err := reg.Heartbeat(nodeId, shardId, currRole, 0 /*term*/); err != nil {
+						log.Printf("[cp] heartbeat err: %v", err)
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}(runCtx)
 	}
 
 	handler := httpserver.New(httpserver.Options{
@@ -119,11 +166,14 @@ func main() {
 	select {
 	case sig := <-sigCh:
 		log.Printf("[shutdown] signal=%s", sig)
-
 	case err := <-errChan:
 		log.Fatalf("[fatal] %v", err)
 	}
 
+	// stop background loops
+	runCancel()
+
+	// graceful HTTP shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -132,7 +182,6 @@ func main() {
 	} else {
 		log.Printf("[ok] http stopped")
 	}
-
 }
 
 // returns the first non-empty string from left to right.
@@ -152,7 +201,6 @@ func splitCSV(s string) []string {
 	}
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
-
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part != "" {

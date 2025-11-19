@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 )
 
 type Server struct{
@@ -23,6 +24,9 @@ func NewServer(s *State) *Server{
 func(s *Server) routes(){
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/cluster/map", s.handleClusterMap)
+	s.mux.HandleFunc("/cluster/live", s.handleClusterLive)
+	s.mux.HandleFunc("/register", s.handleRegister)
+	s.mux.HandleFunc("/heartbeat", s.handleHeartbeat)
 }
 
 
@@ -36,8 +40,69 @@ func (s *Server) handleClusterMap(w http.ResponseWriter, _ *http.Request){
 
 }
 
+func (s *Server) handleClusterLive(w http.ResponseWriter, _ *http.Request){
+	lc := s.state.LiveCluster()
+	writeJSON(w, http.StatusOK, lc)
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request){
 	s.mux.ServeHTTP(w, r)
+}
+
+type registerReq struct {
+	NodeID   string `json:"node_id"`
+	ShardID  int    `json:"shard_id"`
+	HTTP     string `json:"http"`
+	Raft     string `json:"raft"`
+	RoleHint string `json:"role_hint"`
+	Term     uint64 `json:"term"`  
+}
+
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request){
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req registerReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil{
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	s.state.UpsertNode(&NodeInfo{
+		NodeID:   req.NodeID,
+		ShardID:  req.ShardID,
+		HTTP:     req.HTTP,
+		Raft:     req.Raft,
+		RoleHint: req.RoleHint,
+		Term:     req.Term,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ts": time.Now().UnixMilli()})
+}
+
+type heartbeatReq struct {
+	NodeID   string `json:"node_id"`
+	ShardID  int    `json:"shard_id"`
+	RoleHint string `json:"role_hint"`
+	Term     uint64 `json:"term"`
+}
+
+func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request){
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req heartbeatReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	s.state.UpsertNode(&NodeInfo{
+		NodeID:   req.NodeID,
+		ShardID:  req.ShardID,
+		RoleHint: req.RoleHint,
+		Term:     req.Term,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
