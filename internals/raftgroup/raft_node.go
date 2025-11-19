@@ -158,6 +158,69 @@ func (n *Node) LastContactMS() int64 {
 	return time.Since(t).Milliseconds()
 }
 
+func (n *Node) CurrentConfig() (map[raft.ServerID]raft.ServerAddress, error) {
+	if n.raft == nil {
+		return nil, fmt.Errorf("raft nil")
+	}
+	f := n.raft.GetConfiguration()
+	if err := f.Error(); err != nil {
+		return nil, err
+	}
+	cfg := f.Configuration()
+	out := map[raft.ServerID]raft.ServerAddress{}
+	for _, s := range cfg.Servers {
+		out[s.ID] = s.Address
+	}
+	return out, nil
+}
+
+func (n *Node) getIndex() (uint64, error) {
+	cfgFuture := n.raft.GetConfiguration()
+	if err := cfgFuture.Error(); err != nil {
+		return 0, err
+	}
+	idx := cfgFuture.Index()
+	return idx, nil
+}
+
+// add as NonVoter (learner), caller should later Promote.
+func (n *Node) AddReplicaLearner(id raft.ServerID, addr raft.ServerAddress, timeout time.Duration) error {
+	if !n.IsLeader() {
+		return fmt.Errorf("not leader")
+	}
+	idx, err := n.getIndex()
+	if err != nil {
+		return err
+	}
+	f := n.raft.AddNonvoter(id, addr, idx, timeout)
+	return f.Error()
+}
+
+// promotes a learner to voter.
+func (n *Node) PromoteReplica(id raft.ServerID, addr raft.ServerAddress, timeout time.Duration) error {
+	if !n.IsLeader() {
+		return fmt.Errorf("not leader")
+	}
+	idx, err := n.getIndex()
+	if err != nil {
+		return err
+	}
+	f := n.raft.AddVoter(id, addr, idx, timeout)
+	return f.Error()
+}
+
+func (n *Node) RemoveReplica(id raft.ServerID, timeout time.Duration) error {
+	if !n.IsLeader() {
+		return fmt.Errorf("not leader")
+	}
+	idx, err := n.getIndex()
+	if err != nil {
+		return err
+	}
+	f := n.raft.RemoveServer(id, idx, timeout)
+	return f.Error()
+}
+
 // this will issue a linearizability barrier against the current leader.
 func (n *Node) Barrier(timeout time.Duration) error {
 	if n.raft == nil {

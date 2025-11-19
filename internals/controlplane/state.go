@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -29,6 +30,42 @@ type State struct {
 	dyn            map[int]map[string]*NodeInfo
 	ttl            time.Duration
 	leaderPerShard map[int]string
+	desired        map[int]map[string]DesiredReplica
+}
+
+type DesiredReplica struct {
+	NodeID  string `json:"node_id"`
+	ShardID int    `json:"shard_id"`
+	HTTP    string `json:"http"`
+	Raft    string `json:"raft"`
+}
+
+type DesiredMembership struct {
+	// represents what the cluster is supposed to look like not what is currently alive.
+	ByShard map[int]map[string]DesiredReplica `json:"by_shard"`
+}
+
+func (s *State) Desired() DesiredMembership {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := DesiredMembership{ByShard: map[int]map[string]DesiredReplica{}}
+	for _, sh := range s.cluster.Shards {
+		if out.ByShard[sh.ID] == nil {
+			out.ByShard[sh.ID] = map[string]DesiredReplica{}
+		}
+		if _, ok := out.ByShard[sh.ID]; ok && len(out.ByShard[sh.ID]) == 0 {
+			for _, n := range sh.Nodes {
+				out.ByShard[sh.ID][n.NodeID] = DesiredReplica{
+					NodeID:  n.NodeID,
+					ShardID: sh.ID,
+					HTTP:    n.HTTPAddr,
+					Raft:    n.RaftAddr,
+				}
+			}
+		}
+	}
+	return out
 }
 
 // LoadStatic keeps static map and prepares dynamic overlay.
@@ -47,7 +84,63 @@ func LoadStatic(path string, ttl time.Duration) (*State, error) {
 		dyn:            make(map[int]map[string]*NodeInfo),
 		ttl:            ttl,
 		leaderPerShard: make(map[int]string),
+		desired:        make(map[int]map[string]DesiredReplica),
 	}, nil
+}
+
+func (s *State) ensureDesiredShard(shardID int) {
+	if s.desired[shardID] == nil {
+		s.desired[shardID] = make(map[string]DesiredReplica)
+		// seed from static for convenience
+		if sh := s.cluster.ShardByID(shardID); sh != nil {
+			for _, n := range sh.Nodes {
+				s.desired[shardID][n.NodeID] = DesiredReplica{
+					NodeID: n.NodeID, ShardID: shardID, HTTP: n.HTTPAddr, Raft: n.RaftAddr,
+				}
+			}
+		}
+	}
+}
+
+func (s *State) SetDesiredAdd(rep DesiredReplica) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rep.NodeID == "" {
+		return errors.New("missing node_id")
+	}
+	s.ensureDesiredShard(rep.ShardID)
+	s.desired[rep.ShardID][rep.NodeID] = rep
+	return nil
+}
+
+func (s *State) SetDesiredRemove(shardID int, nodeID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureDesiredShard(shardID)
+	delete(s.desired[shardID], nodeID)
+	return nil
+}
+
+// returns the current desired map.
+func (s *State) DesiredSnapshot() DesiredMembership {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := DesiredMembership{ByShard: map[int]map[string]DesiredReplica{}}
+	// ensure every shard appears
+	for _, sh := range s.cluster.Shards {
+		if out.ByShard[sh.ID] == nil {
+			out.ByShard[sh.ID] = map[string]DesiredReplica{}
+		}
+	}
+	for shard, byNode := range s.desired {
+		if out.ByShard[shard] == nil {
+			out.ByShard[shard] = map[string]DesiredReplica{}
+		}
+		for nid, rep := range byNode {
+			out.ByShard[shard][nid] = rep
+		}
+	}
+	return out
 }
 
 // GetClusterMap returns static map (as-is). The API layer will
@@ -70,9 +163,13 @@ func (s *State) UpsertNode(n *NodeInfo) {
 	now := time.Now()
 
 	if ok {
-		// Update mutable fields
-		existing.HTTP = n.HTTP
-		existing.Raft = n.Raft
+		// Only overwrite when incoming values are non-empty / non-zero.
+		if n.HTTP != "" {
+			existing.HTTP = n.HTTP
+		}
+		if n.Raft != "" {
+			existing.Raft = n.Raft
+		}
 		if n.RoleHint != "" {
 			existing.RoleHint = n.RoleHint
 		}
@@ -85,7 +182,6 @@ func (s *State) UpsertNode(n *NodeInfo) {
 		s.dyn[n.ShardID][n.NodeID] = n
 	}
 
-	// Best-effort leader hint per shard.
 	if n.RoleHint == "leader" {
 		s.leaderPerShard[n.ShardID] = n.NodeID
 	}
