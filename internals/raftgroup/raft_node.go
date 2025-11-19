@@ -130,6 +130,43 @@ func (n *Node) ProposePut(op store.PutOp, timeout time.Duration) error {
 	return f.Error()
 }
 
+func (n *Node) Role() string {
+	if n.raft == nil {
+		return ""
+	}
+	if n.raft.State() == raft.Leader {
+		return "leader"
+	}
+	return "follower"
+}
+
+func (n *Node) Term() uint64 {
+	if n.raft == nil {
+		return 0
+	}
+	return n.raft.CurrentTerm()
+}
+
+func (n *Node) LastContactMS() int64 {
+	if n.raft == nil {
+		return 1 << 30 // this will be considered as stale
+	}
+	t := n.raft.LastContact()
+	if t.IsZero() {
+		return 1 << 30
+	}
+	return time.Since(t).Milliseconds()
+}
+
+// this will issue a linearizability barrier against the current leader.
+func (n *Node) Barrier(timeout time.Duration) error {
+	if n.raft == nil {
+		return fmt.Errorf("raft not initialized")
+	}
+	f := n.raft.Barrier(timeout)
+	return f.Error()
+}
+
 // choose the smallest address as "first" bootstrap node
 func isLexicographicallyFirst(self raft.ServerAddress, peers []raft.ServerAddress) bool {
 	cp := append([]raft.ServerAddress(nil), peers...)

@@ -3,17 +3,18 @@ package cluster
 type Node struct {
 	NodeID   string `json:"node_id" yaml:"node_id"`
 	ShardID  int    `json:"shard_id" yaml:"shard_id"`
-	RaftAddr string `json:"raft_addr" yaml:"raft_addr"`
-	HTTPAddr string `json:"http_addr" yaml:"http_addr"`
+	RaftAddr string `json:"raft" yaml:"raft"`
+	HTTPAddr string `json:"http" yaml:"http"`
 }
 
 type Shard struct {
-	ID       int    `json:"id" yaml:"id"`
-	Replicas []Node `json:"replicas" yaml:"replicas"`
+	ID    int    `json:"id" yaml:"id"`
+	Nodes []Node `json:"nodes" yaml:"nodes"`
 }
 
 type ClusterMap struct {
-	Shards []Shard
+	Shards            []Shard `json:"shards" yaml:"shards"`
+	ReplicationFactor int     `json:"replication_factor" yaml:"replication_factor"`
 }
 
 func (c *ClusterMap) ShardIDs() []int {

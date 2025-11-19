@@ -59,11 +59,11 @@ func (r *Router) pickNodeHTTP(shardID int) (string, error) {
 	r.mu.RUnlock()
 
 	sh := r.cluster.ShardByID(shardID)
-	if sh == nil || len(sh.Replicas) == 0 {
+	if sh == nil || len(sh.Nodes) == 0 {
 		return "", fmt.Errorf("no replicas for shard %d", shardID)
 	}
 	// fallback: first replica http addr
-	return sh.Replicas[0].HTTPAddr, nil
+	return sh.Nodes[0].HTTPAddr, nil
 }
 
 func (r *Router) updateLeader(shardID int, leaderHTTP string) {
