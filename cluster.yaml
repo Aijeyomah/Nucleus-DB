@@ -11,14 +11,14 @@ shards:
       - node_id: node-c
         http: http://localhost:8082
         raft: 127.0.0.1:9003
-  - id: 1
-    nodes:
-      - node_id: node-d
-        http: http://localhost:9080
-        raft: 127.0.0.1:9011
-      - node_id: node-e
-        http: http://localhost:9081
-        raft: 127.0.0.1:9012
-      - node_id: node-f
-        http: http://localhost:9082
-        raft: 127.0.0.1:9013
+  # - id: 1
+  #   nodes:
+  #     - node_id: node-d
+  #       http: http://localhost:9080
+  #       raft: 127.0.0.1:9011
+  #     - node_id: node-e
+  #       http: http://localhost:9081
+  #       raft: 127.0.0.1:9012
+  #     - node_id: node-f
+  #       http: http://localhost:9082
+  #       raft: 127.0.0.1:9013
