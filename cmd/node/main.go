@@ -149,50 +149,52 @@ func main() {
 					if want == nil {
 						continue
 					}
-					cur, err := rnode.CurrentConfig()
-					// cur: ServerID(raftAddr) -> raftAddr
+					// inside the reconcile loop (leader only)
+
+					// 1) Build desired-by-address set
+					desiredByAddr := map[raft.ServerAddress]nodecp.DesiredReplica{}
+					for _, rep := range want {
+						addr := raft.ServerAddress(rep.Raft)
+						desiredByAddr[addr] = rep
+					}
+
+					// 2) Snapshot current config as address sets
+					curCfg, err := rnode.CurrentConfig() // map[ServerID]ServerAddress
 					if err != nil {
 						log.Printf("[raft] config err: %v", err)
-						continue
+						return
 					}
 
-					// Build sets of current IDs and desired IDs (both as raft addresses)
-					curIDs := make(map[string]struct{}, len(cur))
-					for sid := range cur {
-						curIDs[string(sid)] = struct{}{} // sid is ServerID == raftAddr
+					// make fast-lookup sets
+					curAddrSet := map[raft.ServerAddress]struct{}{}
+					for _, addr := range curCfg {
+						curAddrSet[addr] = struct{}{}
 					}
 
-					// desired by raft address
-					wantIDs := map[string]nodecp.DesiredReplica{}
-					for _, rep := range want { // want is map[nodeID]DesiredReplica
-						wantIDs[rep.Raft] = rep
-					}
-
-					// 1) Add learners for missing desired raft addresses
-					for raftAddr := range wantIDs {
-						if _, ok := curIDs[raftAddr]; !ok {
-							log.Printf("[mship] add learner shard=%d raft=%s", shardId, raftAddr)
-							if err := rnode.AddReplicaLearner(raft.ServerID(raftAddr), raft.ServerAddress(raftAddr), 5*time.Second); err != nil {
+					// 3) Add missing addresses as learners
+					for addr, rep := range desiredByAddr {
+						if _, ok := curAddrSet[addr]; !ok {
+							log.Printf("[mship] add learner shard=%d raft=%s node=%s", shardId, addr, rep.NodeID)
+							if err := rnode.AddReplicaLearner(raft.ServerID(addr), addr, 5*time.Second); err != nil {
 								log.Printf("[mship] add learner failed: %v", err)
-								continue
 							}
 						}
 					}
 
-					// 2) Promote learners (idempotent)
-					for raftAddr := range wantIDs {
-						_ = rnode.PromoteReplica(raft.ServerID(raftAddr), raft.ServerAddress(raftAddr), 5*time.Second)
+					// 4) Try to promote any present learners (idempotent in Hashi Raft)
+					for addr := range desiredByAddr {
+						_ = rnode.PromoteReplica(raft.ServerID(addr), addr, 5*time.Second)
 					}
 
-					// 3) Remove extras (never remove self; never drop below quorum)
-					localID := raft.ServerID(*flagRaftAddr)
-					for sid := range cur {
-						raftAddr := string(sid)
-						if sid == localID {
-							continue // don't remove self from self
-						}
-						if _, keep := wantIDs[raftAddr]; !keep {
-							log.Printf("[mship] remove shard=%d raft=%s", shardId, raftAddr)
+					// 5) Remove extras that are present but not desired (by address)
+					for sid, addr := range curCfg {
+						if _, keep := desiredByAddr[addr]; !keep {
+							// Optional: guard against removing the last voter
+							if len(curCfg) == 1 {
+								log.Printf("[mship] skip remove %s: last voter", addr)
+								continue
+							}
+							log.Printf("[mship] remove shard=%d addr=%s", shardId, addr)
 							if err := rnode.RemoveReplica(sid, 5*time.Second); err != nil {
 								log.Printf("[mship] remove failed: %v", err)
 							}

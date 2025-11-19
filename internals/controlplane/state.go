@@ -88,10 +88,12 @@ func LoadStatic(path string, ttl time.Duration) (*State, error) {
 	}, nil
 }
 
+// in control plane state:
 func (s *State) ensureDesiredShard(shardID int) {
 	if s.desired[shardID] == nil {
 		s.desired[shardID] = make(map[string]DesiredReplica)
-		// seed from static for convenience
+	}
+	if len(s.desired[shardID]) == 0 {
 		if sh := s.cluster.ShardByID(shardID); sh != nil {
 			for _, n := range sh.Nodes {
 				s.desired[shardID][n.NodeID] = DesiredReplica{
@@ -123,22 +125,17 @@ func (s *State) SetDesiredRemove(shardID int, nodeID string) error {
 
 // returns the current desired map.
 func (s *State) DesiredSnapshot() DesiredMembership {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	out := DesiredMembership{ByShard: map[int]map[string]DesiredReplica{}}
-	// ensure every shard appears
 	for _, sh := range s.cluster.Shards {
-		if out.ByShard[sh.ID] == nil {
-			out.ByShard[sh.ID] = map[string]DesiredReplica{}
+		s.ensureDesiredShard(sh.ID)
+		dst := make(map[string]DesiredReplica, len(s.desired[sh.ID]))
+		for k, v := range s.desired[sh.ID] {
+			dst[k] = v
 		}
-	}
-	for shard, byNode := range s.desired {
-		if out.ByShard[shard] == nil {
-			out.ByShard[shard] = map[string]DesiredReplica{}
-		}
-		for nid, rep := range byNode {
-			out.ByShard[shard][nid] = rep
-		}
+		out.ByShard[sh.ID] = dst
 	}
 	return out
 }
