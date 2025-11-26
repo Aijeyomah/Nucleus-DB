@@ -42,6 +42,11 @@ type Server struct {
 	mu  *http.ServeMux
 }
 
+type KvPair struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 func New(opt Options) *Server {
 	if opt.ProposeTimeout <= 0 {
 		opt.ProposeTimeout = 5 * time.Second
@@ -56,7 +61,6 @@ func New(opt Options) *Server {
 		mu:  http.NewServeMux(),
 		opt: opt,
 	}
-
 	server.routes()
 	return server
 
@@ -71,6 +75,7 @@ func (s *Server) routes() { // Todo: see how to warp each handler to get the lat
 	s.mu.HandleFunc("/whoami", s.handleWhoami)
 	s.mu.HandleFunc("/kv/", s.handleKV)
 	s.mu.HandleFunc("/ready", s.ready)
+	s.mu.HandleFunc("/migrate/ingest", s.handleMigrateIngest)
 }
 
 func (s *Server) handleHeath(w http.ResponseWriter, _ *http.Request) {
@@ -191,6 +196,44 @@ func (s *Server) handleDelete(w http.ResponseWriter, _ *http.Request, key string
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true,
 	})
+}
+
+// This is Leader-only endpoint used by a source shard leader to load moved keys
+func (s *Server) handleMigrateIngest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.opt.Raft == nil || !s.opt.Raft.IsLeader() {
+		s.notLeader(w)
+		return
+	}
+	var items []KvPair
+	if err := json.NewDecoder(r.Body).Decode(&items); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if len(items) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ingested": 0})
+		return
+	}
+	ingested := 0
+	deadline := time.Now().Add(10 * time.Second)
+	for _, it := range items {
+		if it.Key == "" {
+			continue
+		}
+		to := time.Until(deadline)
+		if to <= 0 {
+			break
+		}
+		op := store.NewPutOp(it.Key, it.Value, "reshard", fmt.Sprintf("%d", time.Now().UnixNano()))
+		if err := s.opt.Raft.ProposePut(op, to); err != nil {
+			continue
+		}
+		ingested++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ingested": ingested})
 }
 
 func (s *Server) handleKV(w http.ResponseWriter, r *http.Request) {

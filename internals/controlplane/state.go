@@ -31,6 +31,7 @@ type State struct {
 	ttl            time.Duration
 	leaderPerShard map[int]string
 	desired        map[int]map[string]DesiredReplica
+	reshard        ReshardState
 }
 
 type DesiredReplica struct {
@@ -59,8 +60,8 @@ func (s *State) Desired() DesiredMembership {
 				out.ByShard[sh.ID][n.NodeID] = DesiredReplica{
 					NodeID:  n.NodeID,
 					ShardID: sh.ID,
-					HTTP:    n.HTTPAddr,
-					Raft:    n.RaftAddr,
+					HTTP:    n.HTTP,
+					Raft:    n.Raft,
 				}
 			}
 		}
@@ -97,7 +98,7 @@ func (s *State) ensureDesiredShard(shardID int) {
 		if sh := s.cluster.ShardByID(shardID); sh != nil {
 			for _, n := range sh.Nodes {
 				s.desired[shardID][n.NodeID] = DesiredReplica{
-					NodeID: n.NodeID, ShardID: shardID, HTTP: n.HTTPAddr, Raft: n.RaftAddr,
+					NodeID: n.NodeID, ShardID: shardID, HTTP: n.HTTP, Raft: n.Raft,
 				}
 			}
 		}
@@ -265,4 +266,22 @@ func (s *State) LiveCluster() LiveCluster {
 	}
 
 	return lc
+}
+
+// This will swap the current cluster layout with the plan's new layout
+func (s *State) ApplyReshardCutover() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	active, plan, _ := s.reshard.Snapshot()
+	if !active || plan == nil {
+		return
+	}
+	// Replace static layout with new one
+	s.cluster = plan.New
+	// Reset leader hints they will repopulate via heartbeats from nodes.
+	s.leaderPerShard = make(map[int]string)
+	// Clear dynamic table for unknown nodes, they'll re-register again.
+	s.dyn = make(map[int]map[string]*NodeInfo)
+	s.reshard.Clear()
 }

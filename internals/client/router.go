@@ -35,7 +35,7 @@ func (e *NotLeaderError) Error() string {
 func NewRouter(cm cluster.ClusterMap) *Router {
 	return &Router{
 		httpClient: &http.Client{Timeout: 3 * time.Second},
-		ring:       hashring.New(cm.ShardIDs(), 15),
+		ring:       hashring.New(cm.ShardIDs(), hashring.DefaultReplicas),
 		cluster:    cm,
 		leaderHTTP: make(map[int]string),
 	}
@@ -63,7 +63,7 @@ func (r *Router) pickNodeHTTP(shardID int) (string, error) {
 		return "", fmt.Errorf("no replicas for shard %d", shardID)
 	}
 	// fallback: first replica http addr
-	return sh.Nodes[0].HTTPAddr, nil
+	return sh.Nodes[0].HTTP, nil
 }
 
 func (r *Router) updateLeader(shardID int, leaderHTTP string) {

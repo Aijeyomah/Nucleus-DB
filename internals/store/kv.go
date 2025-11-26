@@ -42,9 +42,9 @@ func (s *InMemory) CAS(key, cmp, val string) {
 }
 
 // return a copy of the currnt memory state
-func(s *InMemory) Snapshot() map[string]string {
+func (s *InMemory) Snapshot() map[string]string {
 	s.mu.RLock()
-  defer s.mu.Unlock()
+	defer s.mu.RUnlock()
 
 	cp := make(map[string]string)
 	for k, v := range s.data {
@@ -53,13 +53,12 @@ func(s *InMemory) Snapshot() map[string]string {
 	return cp
 }
 
-func(s *InMemory) Restore(m map[string]string){
+func (s *InMemory) Restore(m map[string]string) {
 	s.mu.RLock()
-	defer s.mu.Unlock()
+	defer s.mu.RUnlock()
 
 	s.data = make(map[string]string)
 	for k, v := range m {
 		s.data[k] = v
 	}
 }
-

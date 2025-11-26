@@ -7,6 +7,8 @@ import (
 	"sync"
 )
 
+const DefaultReplicas = 15
+
 type shardPoint struct {
 	hash    uint32
 	ShardID int
@@ -20,12 +22,14 @@ type Ring struct {
 
 func New(shardIDs []int, replica int) *Ring {
 	if replica <= 0 {
-		replica = 50
+		replica = DefaultReplicas
 	}
 	r := &Ring{replica: replica}
 	for _, id := range shardIDs {
 		r.addShard(id)
 	}
+	// keep points sorted by hash for binary search to work
+	sort.Slice(r.points, func(i, j int) bool { return r.points[i].hash < r.points[j].hash })
 	return r
 }
 
