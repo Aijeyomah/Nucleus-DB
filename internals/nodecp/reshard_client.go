@@ -58,7 +58,7 @@ func (c *ReshardClient) ReportProgress(sourceShard int, moved, total int64) {
 }
 
 func (c *ReshardClient) Cutover() error {
-	req, _ := http.NewRequest(http.MethodGet, c.base+"/reshard/cutover", nil)
+	req, _ := http.NewRequest(http.MethodPost, c.base+"/reshard/cutover", nil)
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return err
