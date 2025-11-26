@@ -43,12 +43,14 @@ func (r *Client) Register(nodeID string, shardID int, httpAddr, raftAddr, role s
 	return r.post("/register", body)
 }
 
-func (r *Client) Heartbeat(nodeID string, shardID int, role string, term uint64) error {
+func (r *Client) Heartbeat(nodeID string, shardID int, role string, term uint64, raft, httpAddr string) error {
 	body := map[string]any{
 		"node_id":   nodeID,
 		"shard_id":  shardID,
 		"role_hint": role,
 		"term":      term,
+		"raft":      raft,
+		"http":      httpAddr,
 	}
 	return r.post("/heartbeat", body)
 }

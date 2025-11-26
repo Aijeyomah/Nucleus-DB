@@ -17,6 +17,7 @@ import (
 	"github.com/Aijeyomah/NucleusDB/internals/config"
 	"github.com/Aijeyomah/NucleusDB/internals/nodecp"
 	"github.com/Aijeyomah/NucleusDB/internals/raftgroup"
+	"github.com/Aijeyomah/NucleusDB/internals/reshard"
 	"github.com/Aijeyomah/NucleusDB/internals/store"
 	"github.com/hashicorp/raft"
 )
@@ -89,9 +90,18 @@ func main() {
 		log.Fatalf("raft node: %v", err)
 	}
 
-	// ---- Stage 4: control-plane register/heartbeat (optional if --control-plane is set)
 	controlPlane := resolve(*FlagControlAddr, cfg.ControlPlane)
 	if strings.TrimSpace(controlPlane) != "" {
+		// start migrator loop
+		mig := reshard.NewMigrator(shardId, kv, rnode, controlPlane)
+		reporter := func(moved, total int64) {
+			rc := nodecp.NewReshardClient(controlPlane)
+			rc.ReportProgress(shardId, moved, total)
+		}
+		ctx, cancelMig := context.WithCancel(context.Background())
+		defer cancelMig()
+		go mig.Run(ctx, reporter)
+
 		reg := nodecp.New(controlPlane)
 
 		role := "follower"
@@ -121,7 +131,7 @@ func main() {
 					if rnode.IsLeader() {
 						currRole = "leader"
 					}
-					if err := reg.Heartbeat(nodeId, shardId, currRole, 0 /*term*/); err != nil {
+					if err := reg.Heartbeat(nodeId, shardId, currRole, 0, *flagRaftAddr, *flagAdvertiseHTTP); err != nil {
 						log.Printf("[cp] heartbeat err: %v", err)
 					}
 				case <-ctx.Done():

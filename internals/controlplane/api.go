@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/Aijeyomah/NucleusDB/internals/cluster"
 )
 
 type Server struct {
@@ -25,6 +27,18 @@ type registerReq struct {
 	Raft     string `json:"raft"`
 	RoleHint string `json:"role_hint"`
 	Term     uint64 `json:"term"`
+}
+
+type reshardPlanReq struct {
+	NewClusterMap cluster.ClusterMap `json:"new_cluster_map"`
+	Reason        string             `json:"reason,omitempty"`
+	Epoch         int64              `json:"epoch"`
+}
+
+type reshardProgressReq struct {
+	SourceShardID int   `json:"source_shard_id"`
+	Moved         int64 `json:"moved"`
+	Total         int64 `json:"total"`
 }
 
 func NewServer(s *State) *Server {
@@ -51,6 +65,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/membership/add", s.handleDesiredAdd)
 	s.mux.HandleFunc("/membership/remove", s.handleDesiredRemove)
 
+	s.mux.HandleFunc("/reshard/plan", s.handleReshardPlan)
+	s.mux.HandleFunc("/reshard/status", s.handleReshardStatus)
+	s.mux.HandleFunc("/reshard/cutover", s.handleReshardCutover)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -96,6 +113,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 type heartbeatReq struct {
 	NodeID   string `json:"node_id"`
 	ShardID  int    `json:"shard_id"`
+	HTTP     string `json:"http"`
+	Raft     string `json:"raft"`
 	RoleHint string `json:"role_hint"`
 	Term     uint64 `json:"term"`
 }
@@ -113,6 +132,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	s.state.UpsertNode(&NodeInfo{
 		NodeID:   req.NodeID,
 		ShardID:  req.ShardID,
+		HTTP:     req.HTTP,
+		Raft:     req.Raft,
 		RoleHint: req.RoleHint,
 		Term:     req.Term,
 	})
@@ -168,6 +189,83 @@ func (s *Server) handleDesiredRemove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleReshardPlan(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		getReshardPlan(s, w, r)
+		return
+	case http.MethodPost:
+		startReshardPlan(s, w, r)
+		return
+	}
+}
+
+func getReshardPlan(s *Server, w http.ResponseWriter, _ *http.Request) {
+	active, plan, _ := s.state.reshard.Snapshot()
+	if !active || plan == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"active": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"active": true, "plan": plan})
+}
+
+func startReshardPlan(s *Server, w http.ResponseWriter, r *http.Request) {
+	var req reshardPlanReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if len(req.NewClusterMap.Shards) == 0 {
+		http.Error(w, "missing shards", http.StatusBadRequest)
+		return
+	}
+	p := &ReshardPlan{
+		New: req.NewClusterMap, Reason: req.Reason, Epoch: req.Epoch,
+	}
+	if err := s.state.reshard.SetPlan(p); err != nil {
+		http.Error(w, "cannot set plan: "+err.Error(), http.StatusBadRequest)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleReshardStatus(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		active, plan, prog := s.state.reshard.Snapshot()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"active":   active,
+			"plan":     plan,
+			"progress": prog,
+		})
+		return
+
+	case http.MethodPost:
+		var req reshardProgressReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		s.state.reshard.Report(ShardProgress{
+			SourceShardID: req.SourceShardID,
+			Moved:         req.Moved,
+			Total:         req.Total,
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+// this will only be called after migration of data is completed.
+func (s *Server) handleReshardCutover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.state.ApplyReshardCutover()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
