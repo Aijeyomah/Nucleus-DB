@@ -29,6 +29,7 @@ func New(base string) *Client {
 
 type DesiredMembership struct {
 	ByShard map[int]map[string]DesiredReplica `json:"by_shard"`
+	Retired map[int]bool                      `json:"retired_shards"`
 }
 
 func (r *Client) Register(nodeID string, shardID int, httpAddr, raftAddr, role string, term uint64) error {

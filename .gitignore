@@ -21,5 +21,5 @@ vendor/
 .vscode/
 *.sublime-project
 *.sublime-workspace
-
+Readme2.md
 data/
