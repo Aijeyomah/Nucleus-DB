@@ -58,6 +58,11 @@ func (f *FSM) Apply(l *raft.Log) interface{} {
 		f.mu.Unlock()
 	}
 
+	if op.Delete {
+		f.KV.Delete(op.Key)
+		return nil
+	}
+
 	f.KV.Put(op.Key, op.Value)
 	return nil
 }

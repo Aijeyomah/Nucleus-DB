@@ -8,6 +8,9 @@ At its core, Nucleus‑DB is built on three ideas: partitioning, replication, an
 
 If you think in terms of the CAP theorem, each shard in Nucleus‑DB prioritizes Consistency and Partition tolerance (CP). When a majority of replicas are healthy, you get strong consistency. If the shard loses quorum, it will stop accepting writes, favoring safety over availability for that shard.
 
+![alt text](nucleus-db-flow.png)
+
+
 
 Nucleus‑DB consists of two major parts:
 	•	Storage Nodes (Shards): Each shard runs as a Raft group. One node is leader, the rest are followers. The leader exposes HTTP endpoints for key-value operations. Behind the scenes, every operation is appended to a Raft log, replicated to a majority, and applied to an in-memory store (with write-ahead log and optional snapshotting).

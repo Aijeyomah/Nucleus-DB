@@ -13,19 +13,19 @@ import (
 
 	"github.com/Aijeyomah/NucleusDB/internals/cluster"
 	"github.com/Aijeyomah/NucleusDB/internals/hashring"
+	"github.com/Aijeyomah/NucleusDB/internals/store"
 )
 
 var BATCH_SIZE = 200
 
 type KV interface {
 	Snapshot() map[string]string
-	Delete(key string)
 }
 
 // Raft role used to gate leader-only migration
 type RoleReader interface {
 	IsLeader() bool
-	LeaderRaftAddr() string
+	ProposePut(store.PutOp, time.Duration) error
 }
 
 // LiveCluster minimal we need from control-plane
@@ -53,6 +53,11 @@ type Migrator struct {
 	// for batch controls
 	BatchSize int
 	Sleep     time.Duration
+}
+
+type migratorKV struct {
+	Key   string
+	Value string
 }
 
 func NewMigrator(sourceShardID int, kv KV, role RoleReader, controlPlane string) *Migrator {
@@ -139,8 +144,7 @@ func (m *Migrator) migrateOnce() (moved, total int64, err error) {
 	if total == 0 {
 		return 0, 0, nil
 	}
-	type kv struct{ Key, Value string }
-	buckets := map[int][]kv{} // targetShard -> kvs
+	buckets := map[int][]migratorKV{} // targetShard -> kvs
 
 	for k, v := range snap {
 		oldShard, _ := oldRing.GetShard(k)
@@ -156,7 +160,7 @@ func (m *Migrator) migrateOnce() (moved, total int64, err error) {
 		if oldShard == m.SourceShardID && newShard != oldShard {
 			log.Printf("[migrator] key=%s old=%d new=%d bucketed", k, oldShard, newShard)
 		}
-		buckets[newShard] = append(buckets[newShard], kv{Key: k, Value: v})
+		buckets[newShard] = append(buckets[newShard], migratorKV{Key: k, Value: v})
 	}
 	if len(buckets) == 0 {
 		return 0, total, nil
@@ -213,14 +217,22 @@ func (m *Migrator) migrateOnce() (moved, total int64, err error) {
 			if resp.StatusCode/100 == 2 {
 				batch := kvs[i:end]
 				moved += int64(len(batch))
-				for _, item := range batch {
-					m.KV.Delete(item.Key)
-				}
+				m.deleteBatch(batch)
 			}
 			time.Sleep(m.Sleep)
 		}
 	}
 	return moved, total, nil
+}
+
+func (m *Migrator) deleteBatch(items []migratorKV) {
+	for _, item := range items {
+		op := store.NewDeleteOp(item.Key, "reshard", fmt.Sprintf("%d", time.Now().UnixNano()))
+		if err := m.RaftRole.ProposePut(op, 5*time.Second); err != nil {
+			log.Printf("[migrator] delete key=%s err=%v", item.Key, err)
+			continue
+		}
+	}
 }
 
 func (m *Migrator) Run(ctx context.Context, report func(moved, total int64)) {

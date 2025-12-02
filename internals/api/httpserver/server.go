@@ -192,10 +192,18 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, key string) {
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, _ *http.Request, key string) {
-	s.opt.KV.Delete(key) //Todo:  check if we need to confirm the key exist. nd if this Delete is compartable with the code or maybe i need to implemnt manualy
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true,
-	})
+	if s.opt.Raft == nil || !s.opt.Raft.IsLeader() {
+		s.notLeader(w)
+		return
+	}
+	clientId := "client"
+	requestId := fmt.Sprintf("%d", time.Now().UnixNano())
+	op := store.NewDeleteOp(key, clientId, requestId)
+	if err := s.opt.Raft.ProposePut(op, s.opt.ProposeTimeout); err != nil {
+		http.Error(w, "raft delete failed: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // This is Leader-only endpoint used by a source shard leader to load moved keys
