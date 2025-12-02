@@ -31,6 +31,7 @@ type State struct {
 	ttl            time.Duration
 	leaderPerShard map[int]string
 	desired        map[int]map[string]DesiredReplica
+	retired        map[int]bool
 	reshard        ReshardState
 }
 
@@ -44,13 +45,18 @@ type DesiredReplica struct {
 type DesiredMembership struct {
 	// represents what the cluster is supposed to look like not what is currently alive.
 	ByShard map[int]map[string]DesiredReplica `json:"by_shard"`
+	// shards listed here should remove themselves
+	Retired map[int]bool `json:"retired_shards,omitempty"`
 }
 
 func (s *State) Desired() DesiredMembership {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	out := DesiredMembership{ByShard: map[int]map[string]DesiredReplica{}}
+	out := DesiredMembership{
+		ByShard: map[int]map[string]DesiredReplica{},
+		Retired: make(map[int]bool),
+	}
 	for _, sh := range s.cluster.Shards {
 		if out.ByShard[sh.ID] == nil {
 			out.ByShard[sh.ID] = map[string]DesiredReplica{}
@@ -64,6 +70,12 @@ func (s *State) Desired() DesiredMembership {
 					Raft:    n.Raft,
 				}
 			}
+		}
+	}
+	for id := range s.retired {
+		out.Retired[id] = true
+		if out.ByShard[id] == nil {
+			out.ByShard[id] = map[string]DesiredReplica{}
 		}
 	}
 	return out
@@ -86,6 +98,7 @@ func LoadStatic(path string, ttl time.Duration) (*State, error) {
 		ttl:            ttl,
 		leaderPerShard: make(map[int]string),
 		desired:        make(map[int]map[string]DesiredReplica),
+		retired:        make(map[int]bool),
 	}, nil
 }
 
@@ -129,7 +142,10 @@ func (s *State) DesiredSnapshot() DesiredMembership {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	out := DesiredMembership{ByShard: map[int]map[string]DesiredReplica{}}
+	out := DesiredMembership{
+		ByShard: map[int]map[string]DesiredReplica{},
+		Retired: make(map[int]bool),
+	}
 	for _, sh := range s.cluster.Shards {
 		s.ensureDesiredShard(sh.ID)
 		dst := make(map[string]DesiredReplica, len(s.desired[sh.ID]))
@@ -137,6 +153,12 @@ func (s *State) DesiredSnapshot() DesiredMembership {
 			dst[k] = v
 		}
 		out.ByShard[sh.ID] = dst
+	}
+	for id := range s.retired {
+		out.Retired[id] = true
+		if _, ok := out.ByShard[id]; !ok {
+			out.ByShard[id] = map[string]DesiredReplica{}
+		}
 	}
 	return out
 }
@@ -276,6 +298,21 @@ func (s *State) ApplyReshardCutover() {
 	active, plan, _ := s.reshard.Snapshot()
 	if !active || plan == nil {
 		return
+	}
+	oldShards := make(map[int]struct{})
+	for _, sh := range s.cluster.Shards {
+		oldShards[sh.ID] = struct{}{}
+	}
+	newShards := make(map[int]struct{})
+	for _, sh := range plan.New.Shards {
+		newShards[sh.ID] = struct{}{}
+		// if shard reappears remove retirement flag
+		delete(s.retired, sh.ID)
+	}
+	for id := range oldShards {
+		if _, ok := newShards[id]; !ok {
+			s.retired[id] = true
+		}
 	}
 	// Replace static layout with new one
 	s.cluster = plan.New

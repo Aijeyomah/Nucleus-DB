@@ -19,6 +19,7 @@ var BATCH_SIZE = 200
 
 type KV interface {
 	Snapshot() map[string]string
+	Delete(key string)
 }
 
 // Raft role used to gate leader-only migration
@@ -210,7 +211,11 @@ func (m *Migrator) migrateOnce() (moved, total int64, err error) {
 			resp.Body.Close()
 
 			if resp.StatusCode/100 == 2 {
-				moved += int64(end - i)
+				batch := kvs[i:end]
+				moved += int64(len(batch))
+				for _, item := range batch {
+					m.KV.Delete(item.Key)
+				}
 			}
 			time.Sleep(m.Sleep)
 		}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -48,6 +49,7 @@ func main() {
 	// long-lived context for background loops (e.g., heartbeat)
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
+	retireCh := make(chan struct{})
 
 	cfg, err := config.Load(config.Options{
 		File:          *ConfigFile,
@@ -141,6 +143,7 @@ func main() {
 		}(runCtx)
 
 		// align live Raft config with desired membership from control plane.
+		var retireOnce sync.Once
 		go func(ctx context.Context) {
 			t := time.NewTicker(3 * time.Second)
 			defer t.Stop()
@@ -157,6 +160,15 @@ func main() {
 						continue
 					}
 					want := desired.ByShard[shardId]
+					if desired.Retired[shardId] {
+						retireOnce.Do(func() {
+							go func() {
+								retireShard(ctx, shardId, raft.ServerID(*flagRaftAddr), rnode)
+								close(retireCh)
+							}()
+						})
+						continue
+					}
 					if want == nil {
 						//skipping cos Nothing desired for this shard yet
 						continue
@@ -224,7 +236,6 @@ func main() {
 					for sid, addr := range cur {
 						raftAddr := string(addr)
 
-						// Keep if desired
 						if _, keep := wantByRaft[raftAddr]; keep {
 							continue
 						}
@@ -288,6 +299,8 @@ func main() {
 		log.Printf("[shutdown] signal=%s", sig)
 	case err := <-errChan:
 		log.Fatalf("[fatal] %v", err)
+	case <-retireCh:
+		log.Printf("[shutdown] shard=%d retired via control plane", shardId)
 	}
 
 	// stop background loops
@@ -301,6 +314,53 @@ func main() {
 		log.Printf("[warn] http shutdown: %v", err)
 	} else {
 		log.Printf("[ok] http stopped")
+	}
+}
+
+func retireShard(ctx context.Context, shardID int, self raft.ServerID, rnode *raftgroup.Node) {
+	log.Printf("[retire] shard=%d retire requested", shardID)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		cur, err := rnode.CurrentConfig()
+		if err != nil {
+			log.Printf("[retire] shard=%d current config err: %v", shardID, err)
+			time.Sleep(time.Second)
+			continue
+		}
+		if len(cur) == 0 {
+			log.Printf("[retire] shard=%d no remaining replicas", shardID)
+			return
+		}
+		if !rnode.IsLeader() {
+			time.Sleep(time.Second)
+			continue
+		}
+		for sid := range cur {
+			if sid == self && len(cur) > 1 {
+				// remove self last
+				continue
+			}
+			if err := rnode.RemoveReplica(sid, 5*time.Second); err != nil {
+				log.Printf("[retire] shard=%d remove %s err: %v", shardID, sid, err)
+			} else {
+				log.Printf("[retire] shard=%d removed replica %s", shardID, sid)
+			}
+		}
+		if len(cur) == 1 {
+			if _, ok := cur[self]; ok {
+				if err := rnode.RemoveReplica(self, 5*time.Second); err != nil {
+					log.Printf("[retire] shard=%d remove self err: %v", shardID, err)
+				} else {
+					log.Printf("[retire] shard=%d removed final replica", shardID)
+				}
+			}
+			return
+		}
+		time.Sleep(time.Second)
 	}
 }
 
