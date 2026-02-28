@@ -89,6 +89,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
+// It registers a node that is starting up, inserting or updating the node’s
+// entry in the control-plane state before periodic heartbeats take over.
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -148,6 +150,7 @@ func (s *Server) handleDesiredGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.state.DesiredSnapshot())
 }
 
+// Records a replica in the control plane’s desired-membership map so shard leaders can poll and add it to Raft.
 func (s *Server) handleDesiredAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

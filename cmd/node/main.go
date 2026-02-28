@@ -46,7 +46,6 @@ func main() {
 
 	flag.Parse()
 
-	// long-lived context for background loops (e.g., heartbeat)
 	runCtx, runCancel := context.WithCancel(context.Background())
 	defer runCancel()
 	retireCh := make(chan struct{})

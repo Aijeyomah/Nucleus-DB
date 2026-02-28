@@ -152,6 +152,8 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, key string) {
 			return
 		}
 
+		// Force the leader to wait until all outstanding writes
+		// are applied to its fsm before serving read.
 		if err := s.opt.Raft.Barrier(1 * time.Second); err != nil {
 			http.Error(w, "leader barrier failed", http.StatusServiceUnavailable)
 			return
@@ -173,7 +175,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, key string) {
 		http.Error(w, "follower_ok only allowed for GET", http.StatusBadRequest)
 		return
 	}
-	const leaseCutoffMS = int64(300) // less than the raft LeaderLeaseTimeout
+	const leaseCutoffMS = int64(300) // less than the raft LeaderLeaseTimeout which is 500ms
 	if s.opt.Raft != nil && (s.opt.Raft.IsLeader() || s.opt.Raft.LastContactMS() <= leaseCutoffMS) {
 		val, ok := s.opt.KV.Get(key)
 		if !ok {
